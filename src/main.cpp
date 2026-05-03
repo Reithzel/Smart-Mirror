@@ -1,5 +1,5 @@
 #include <Arduino.h>
-#include <Servo.h>
+#include <ESP32Servo.h>
 /* =========================
  * Defines generales
  * ========================= */
@@ -36,8 +36,8 @@ typedef enum
 
 typedef enum
 {
-  EV_NO_PERSON = 0,
-  EV_PERSON_DETECTED,
+  EV_NO_TARGET = 0,
+  EV_TARGET_DETECTED,
   EV_TARGET_MISALIGNED,
   EV_TARGET_ALIGNED
 } event_t;
@@ -51,7 +51,7 @@ typedef void (*transition_t)(void);
  * Variables globales FSM
  * ========================= */
 state_t current_state = ST_IDLE;
-event_t new_event = EV_NO_PERSON;
+event_t new_event = EV_NO_TARGET;
 
 /* =========================
  * Variables globales del sistema
@@ -74,8 +74,8 @@ const char* state_names[MAX_STATES] =
 
 const char* event_names[MAX_EVENTS] =
 {
-  "EV_NO_PERSON",
-  "EV_PERSON_DETECTED",
+  "EV_NO_TARGET",
+  "EV_TARGET_DETECTED",
   "EV_TARGET_MISALIGNED",
   "EV_TARGET_ALIGNED"
 };
@@ -117,24 +117,24 @@ transition_t state_table[MAX_STATES][MAX_EVENTS] =
 {
   // ST_IDLE
   {
-    action_idle,              // EV_NO_PERSON
-    action_start_aligning,    // EV_PERSON_DETECTED
+    action_idle,              // EV_NO_TARGET
+    action_start_aligning,    // EV_TARGET_DETECTED
     action_idle,              // EV_TARGET_MISALIGNED
     action_idle               // EV_TARGET_ALIGNED
   },
 
   // ST_ALIGNING
   {
-    action_idle,              // EV_NO_PERSON
-    action_continue_aligning, // EV_PERSON_DETECTED
+    action_idle,              // EV_NO_TARGET
+    action_continue_aligning, // EV_TARGET_DETECTED
     action_continue_aligning, // EV_TARGET_MISALIGNED
     action_hold_aligned       // EV_TARGET_ALIGNED
   },
 
   // ST_ALIGNED
   {
-    action_idle,              // EV_NO_PERSON
-    action_hold_aligned,      // EV_PERSON_DETECTED
+    action_idle,              // EV_NO_TARGET
+    action_hold_aligned,      // EV_TARGET_DETECTED
     action_continue_aligning, // EV_TARGET_MISALIGNED
     action_hold_aligned       // EV_TARGET_ALIGNED
   }
@@ -165,7 +165,7 @@ void get_new_event(void)
 
   if (!is_person_detected(left_distance_cm, right_distance_cm))
   {
-    new_event = EV_NO_PERSON;
+    new_event = EV_NO_TARGET;
     return;
   }
 
@@ -286,7 +286,7 @@ void setup()
 
   current_servo_angle = SERVO_CENTER_ANGLE;
   current_state = ST_IDLE;
-  new_event = EV_NO_PERSON;
+  new_event = EV_NO_TARGET;
 }
 
 /* =========================
