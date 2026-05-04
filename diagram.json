@@ -61,13 +61,6 @@
     },
     {
       "type": "wokwi-resistor",
-      "id": "r6",
-      "top": 99.95,
-      "left": 220.8,
-      "attrs": { "value": "2000" }
-    },
-    {
-      "type": "wokwi-resistor",
       "id": "r7",
       "top": 195.95,
       "left": 105.6,
@@ -102,13 +95,6 @@
       "top": 99.95,
       "left": 614.4,
       "attrs": { "value": "2000" }
-    },
-    {
-      "type": "wokwi-resistor",
-      "id": "r3",
-      "top": 90.35,
-      "left": 278.4,
-      "attrs": { "value": "1000" }
     },
     {
       "type": "wokwi-resistor",
@@ -151,15 +137,9 @@
     [ "bb1:34t.c", "esp:D22", "green", [ "v67.2", "h-403.2" ] ],
     [ "bb1:29t.d", "esp:D23", "blue", [ "v48", "h-345.6" ] ],
     [ "bb1:tn.18", "bb1:23t.b", "black", [ "v0" ] ],
-    [ "r6:1", "bb1:1t.c", "", [ "$bb" ] ],
-    [ "r6:2", "bb1:7t.c", "", [ "$bb" ] ],
-    [ "r3:1", "bb1:7t.b", "", [ "$bb" ] ],
-    [ "r3:2", "bb1:13t.b", "", [ "$bb" ] ],
-    [ "ldr1:VCC", "bb1:tp.12", "red", [ "v0" ] ],
+    [ "ldr1:VCC", "esp:3V3", "red", [ "v0", "h-200" ] ],
     [ "ldr1:GND", "bb1:tn.11", "black", [ "v0" ] ],
-    [ "ldr1:AO", "bb1:13t.a", "blue", [ "v0" ] ],
-    [ "r6:1", "bb1:tn.1", "black", [ "v0" ] ],
-    [ "bb1:7t.a", "esp:D34", "blue", [ "v-57.6", "h-163.4" ] ],
+    [ "ldr1:AO", "esp:D34", "blue", [ "v0", "h-200" ] ],
     [ "r7:1", "esp:D18", "green", [ "v0", "h-595.2" ] ],
     [ "bb1:tp.47", "strip2:VDD.2", "red", [ "v0" ] ],
     [ "bb1:tn.48", "strip2:VSS.2", "black", [ "v0" ] ],
