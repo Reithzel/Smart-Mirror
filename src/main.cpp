@@ -1,5 +1,6 @@
 #include <ESP32Servo.h>
 #include <Adafruit_NeoPixel.h>
+
 /* =========================
  * Definitions and constants
  * ========================= */
@@ -20,7 +21,7 @@
 #define SERVO_CENTER_ANGLE              90
 #define SERVO_MIN_ANGLE                 0
 #define SERVO_MAX_ANGLE                 180
-#define SERVO_STEP_ANGLE                2
+#define SERVO_STEP_ANGLE                1
 
 #define SOUND_SPEED_CM_PER_US 0.0343f
 #define MAX_TIMEOUT_US 5830UL
@@ -37,6 +38,15 @@
 #define LED_MIN_BRIGHTNESS          0
 #define LED_MAX_BRIGHTNESS          255
 #define LED_FADE_STEP               5
+
+#define LED_WHITE_VALUE             255
+
+#define SERVO_TIMER_PERIOD_MS       50
+#define LED_TIMER_PERIOD_MS         100
+
+#define STACK_SIZE_TASKS          2048
+#define PRIORITY_LED_TASK            1
+#define PRIORITY_FSM_TASK            1
 
 /* =========================
  * Enumerations for FSM states and events
@@ -68,10 +78,14 @@ state_t current_state = ST_IDLE;
 event_t new_event = EV_NO_TARGET;
 
 /* =========================
- * Global variables (Servo and Ledstrip)
+ * Global variables
  * ========================= */
 Servo mirrorServo;
 Adafruit_NeoPixel ledStrip(LED_STRIP_PIXEL_COUNT, LED_STRIP_PIN, NEO_GRB + NEO_KHZ800);
+TimerHandle_t servo_timer;
+TaskHandle_t fsm_task_handle;
+TimerHandle_t led_timer;
+TaskHandle_t led_task_handle;
 
 float left_distance_cm = INVALID_DISTANCE_CM;
 float right_distance_cm = INVALID_DISTANCE_CM;
@@ -124,6 +138,10 @@ void center_servo(void);
 
 // Utility 
 void debug_print_transition(state_t state, event_t event);
+void servo_timer_callback(TimerHandle_t xTimer);
+void fsm_task(void* pvParameters);
+void led_timer_callback(TimerHandle_t xTimer);
+void led_task(void* pvParameters);
 
 // Light management functions declarations
 void update_light_control(void);
@@ -164,6 +182,8 @@ transition_t state_table[MAX_STATES][MAX_EVENTS] =
     action_hold_aligned       // EV_TARGET_ALIGNED
   }
 };
+
+/* We could also add "error" actions, for example if the current state is "IDLE" we could never trigger the "EV_TARGET_ALIGNED" event, that's an error. */
 
 /* =========================
  * FSM (Finite State Machine)
@@ -361,7 +381,7 @@ void move_servo_right(void)
 
 void hold_servo_position(void)
 {
-  // TODO
+  mirrorServo.write(current_servo_angle);
 }
 
 void center_servo(void)
@@ -387,46 +407,36 @@ void debug_print_transition(state_t state, event_t event)
 
 void update_light_control(void)
 {
+  if (current_state == ST_IDLE)
+  {
+    fade_out_leds();
+    return;
+  }
+
   update_leds_from_ldr();
 }
 
 void update_leds_from_ldr(void)
 {
-  static unsigned long last_light_debug_ms = 0;
-
   ldr_value = read_ldr_value();
-  
-  int target_brightness = calculate_led_brightness(ldr_value);
+  const int target_brightness = calculate_led_brightness(ldr_value);
 
-  if (millis() - last_light_debug_ms >= 500)
+  if (current_led_brightness < target_brightness)
   {
-    Serial.print("[LIGHT] LDR: ");
-    Serial.print(ldr_value);
-    Serial.print(" | Brightness: ");
-    Serial.println(target_brightness);
-    last_light_debug_ms = millis();
+    set_led_brightness(min(current_led_brightness + LED_FADE_STEP, target_brightness));
   }
-  
-  set_led_brightness(target_brightness);
+  else if (current_led_brightness > target_brightness)
+  {
+    set_led_brightness(max(current_led_brightness - LED_FADE_STEP, target_brightness));
+  }
 }
 
 void fade_out_leds(void)
 {
-  if (current_led_brightness <= LED_MIN_BRIGHTNESS)
+  if (current_led_brightness > LED_MIN_BRIGHTNESS)
   {
-    current_led_brightness = LED_MIN_BRIGHTNESS;
-    set_led_brightness(current_led_brightness);
-    return;
+    set_led_brightness(max(current_led_brightness - LED_FADE_STEP, LED_MIN_BRIGHTNESS));
   }
-
-  current_led_brightness -= LED_FADE_STEP;
-
-  if (current_led_brightness < LED_MIN_BRIGHTNESS)
-  {
-    current_led_brightness = LED_MIN_BRIGHTNESS;
-  }
-
-  set_led_brightness(current_led_brightness);
 }
 
 int read_ldr_value(void)
@@ -434,33 +444,73 @@ int read_ldr_value(void)
   return analogRead(LDR_PIN);
 }
 
-int calculate_led_brightness(int value)
+int calculate_led_brightness(int ldr_value)
 {
-  value = constrain(value, 0, 4095);
-  return (4095 - value) >> 4;
+  if (ldr_value <= LDR_BRIGHT_VALUE)
+  {
+    return LED_MIN_BRIGHTNESS;
+  }
+
+  if (ldr_value >= LDR_DARK_VALUE)
+  {
+    return LED_MAX_BRIGHTNESS;
+  }
+
+  return ((ldr_value - LDR_BRIGHT_VALUE) * LED_MAX_BRIGHTNESS) /
+         (LDR_DARK_VALUE - LDR_BRIGHT_VALUE);
 }
 
 void set_led_brightness(int brightness)
 {
-  static int last_written_brightness = -1;
-
   brightness = constrain(brightness, LED_MIN_BRIGHTNESS, LED_MAX_BRIGHTNESS);
-  current_led_brightness = brightness;
 
-  if (current_led_brightness == last_written_brightness)
+  if (brightness == current_led_brightness)
   {
     return;
   }
 
-  ledStrip.fill(
-    ledStrip.Color(current_led_brightness, current_led_brightness, current_led_brightness),
-    0,
-    ledStrip.numPixels()
-  );
+  current_led_brightness = brightness;
+  ledStrip.setBrightness(current_led_brightness);
+
+  for (uint16_t i = 0; i < LED_STRIP_PIXEL_COUNT; i++)
+  {
+    ledStrip.setPixelColor(i, ledStrip.Color(LED_WHITE_VALUE, LED_WHITE_VALUE, LED_WHITE_VALUE));
+  }
+
   ledStrip.show();
-  last_written_brightness = current_led_brightness;
 }
 
+/* =========================
+ * Timer callback for servo adjustments
+ * ========================= */
+
+void servo_timer_callback(TimerHandle_t xTimer) 
+{
+  xTaskNotifyGive(fsm_task_handle);
+}
+
+void led_timer_callback(TimerHandle_t xTimer) 
+{
+  xTaskNotifyGive(led_task_handle);
+}
+
+void fsm_task(void* pvParameters)
+{
+  while (true)
+  {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    smart_mirror_fsm();
+  }
+}
+
+void led_task(void* pvParameters)
+{
+  while (true)
+  {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    update_light_control();
+  }
+}
 
 /* =========================
  * Setup
@@ -483,18 +533,24 @@ void setup()
 
   mirrorServo.attach(SERVO_PIN);
   mirrorServo.write(SERVO_CENTER_ANGLE);
-
   current_servo_angle = SERVO_CENTER_ANGLE;
+
   current_state = ST_IDLE;
   new_event = EV_NO_TARGET;
+
+  xTaskCreate(fsm_task, "FSM Task", STACK_SIZE_TASKS, NULL, PRIORITY_FSM_TASK, &fsm_task_handle);
+  xTaskCreate(led_task, "LED Task", STACK_SIZE_TASKS, NULL, PRIORITY_LED_TASK, &led_task_handle);
+
+  servo_timer = xTimerCreate("ServoTimer", pdMS_TO_TICKS(SERVO_TIMER_PERIOD_MS), pdTRUE, NULL, servo_timer_callback);
+  led_timer = xTimerCreate("LEDTimer", pdMS_TO_TICKS(LED_TIMER_PERIOD_MS), pdTRUE, NULL, led_timer_callback);
+  xTimerStart(servo_timer, 0);
+  xTimerStart(led_timer, 0);
 }
 
 /* =========================
- * Main loop
+ * Main loop (not in use because we use tasks and timers)
  * ========================= */
 void loop()
 {
-  smart_mirror_fsm();
-  update_light_control();
-  delay(50); // No podemos usar delay, revisar.
+
 }
