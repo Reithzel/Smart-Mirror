@@ -21,7 +21,7 @@
 #define SERVO_CENTER_ANGLE              90
 #define SERVO_MIN_ANGLE                 0
 #define SERVO_MAX_ANGLE                 180
-#define SERVO_STEP_ANGLE                2
+#define SERVO_STEP_ANGLE                1
 
 #define SOUND_SPEED_CM_PER_US 0.0343f
 #define MAX_TIMEOUT_US 5830UL
@@ -44,8 +44,7 @@
 #define SERVO_TIMER_PERIOD_MS       50
 #define LED_TIMER_PERIOD_MS         100
 
-#define STACK_SIZE_FSM_TASK          4096
-#define STACK_SIZE_LED_TASK          2048
+#define STACK_SIZE_TASKS          2048
 #define PRIORITY_LED_TASK            1
 #define PRIORITY_FSM_TASK            1
 
@@ -183,6 +182,8 @@ transition_t state_table[MAX_STATES][MAX_EVENTS] =
     action_hold_aligned       // EV_TARGET_ALIGNED
   }
 };
+
+/* We could also add "error" actions, for example if the current state is "IDLE" we could never trigger the "EV_TARGET_ALIGNED" event, that's an error. */
 
 /* =========================
  * FSM (Finite State Machine)
@@ -380,7 +381,7 @@ void move_servo_right(void)
 
 void hold_servo_position(void)
 {
-  // TODO
+  mirrorServo.write(current_servo_angle);
 }
 
 void center_servo(void)
@@ -532,13 +533,13 @@ void setup()
 
   mirrorServo.attach(SERVO_PIN);
   mirrorServo.write(SERVO_CENTER_ANGLE);
-
   current_servo_angle = SERVO_CENTER_ANGLE;
+
   current_state = ST_IDLE;
   new_event = EV_NO_TARGET;
 
-  xTaskCreate(fsm_task, "FSM Task", STACK_SIZE_FSM_TASK, NULL, PRIORITY_FSM_TASK, &fsm_task_handle);
-  xTaskCreate(led_task, "LED Task", STACK_SIZE_LED_TASK, NULL, PRIORITY_LED_TASK, &led_task_handle);
+  xTaskCreate(fsm_task, "FSM Task", STACK_SIZE_TASKS, NULL, PRIORITY_FSM_TASK, &fsm_task_handle);
+  xTaskCreate(led_task, "LED Task", STACK_SIZE_TASKS, NULL, PRIORITY_LED_TASK, &led_task_handle);
 
   servo_timer = xTimerCreate("ServoTimer", pdMS_TO_TICKS(SERVO_TIMER_PERIOD_MS), pdTRUE, NULL, servo_timer_callback);
   led_timer = xTimerCreate("LEDTimer", pdMS_TO_TICKS(LED_TIMER_PERIOD_MS), pdTRUE, NULL, led_timer_callback);
@@ -547,7 +548,7 @@ void setup()
 }
 
 /* =========================
- * Main loop
+ * Main loop (not in use because we use tasks and timers)
  * ========================= */
 void loop()
 {
