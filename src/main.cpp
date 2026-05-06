@@ -1,8 +1,7 @@
-#include <Arduino.h>
 #include <ESP32Servo.h>
 #include <Adafruit_NeoPixel.h>
 /* =========================
- * Defines generales
+ * Definitions and constants
  * ========================= */
 #define DEBUG_SERIAL_BAUDRATE      115200
 
@@ -40,7 +39,7 @@
 #define LED_FADE_STEP               5
 
 /* =========================
- * Estados y eventos
+ * Enumerations for FSM states and events
  * ========================= */
 typedef enum
 {
@@ -58,18 +57,18 @@ typedef enum
 } event_t;
 
 /* =========================
- * Tipo de transición
+ * Transition function type definition
  * ========================= */
 typedef void (*transition_t)(void);
 
 /* =========================
- * Variables globales FSM
+ * Global variables for FSM
  * ========================= */
 state_t current_state = ST_IDLE;
 event_t new_event = EV_NO_TARGET;
 
 /* =========================
- * Variables globales del sistema
+ * Global variables (Servo and Ledstrip)
  * ========================= */
 Servo mirrorServo;
 Adafruit_NeoPixel ledStrip(LED_STRIP_PIXEL_COUNT, LED_STRIP_PIN, NEO_GRB + NEO_KHZ800);
@@ -81,7 +80,7 @@ int current_led_brightness = 0;
 int ldr_value = 0;
 
 /* =========================
- * Strings para debug
+ * String for debug purposes
  * ========================= */
 const char* state_names[MAX_STATES] =
 {
@@ -99,34 +98,34 @@ const char* event_names[MAX_EVENTS] =
 };
 
 /* =========================
- * Prototipos de funciones
+ * Function declarations
  * ========================= */
 
 // FSM
 void smart_mirror_fsm(void);
 void get_new_event(void);
 
-// Lectura y evaluación
+// Reading sensors and evaluating
 float read_ultrasonic_distance_cm(uint8_t trig_pin, uint8_t echo_pin);
 bool is_person_detected(float left_cm, float right_cm);
 bool is_target_aligned(float left_cm, float right_cm);
 
-// Acciones de transición
+// State transition actions
 void action_idle(void);
 void action_start_aligning(void);
 void action_continue_aligning(void);
 void action_hold_aligned(void);
 
-// Acciones auxiliares
+// Auxilliary actions
 void move_servo_left(void);
 void move_servo_right(void);
 void hold_servo_position(void);
 void center_servo(void);
 
-// Utilidades
+// Utility 
 void debug_print_transition(state_t state, event_t event);
 
-// Manejo de Luces
+// Light management functions declarations
 void update_light_control(void);
 void update_leds_from_ldr(void);
 void fade_out_leds(void);
@@ -135,9 +134,9 @@ int calculate_led_brightness(int ldr_value);
 void set_led_brightness(int brightness);
 
 /* =========================
- * Tabla de transición
- * Filas = estados
- * Columnas = eventos
+ * State transition table
+ * Rows = States
+ * Columns = Events
  * ========================= */
 transition_t state_table[MAX_STATES][MAX_EVENTS] =
 {
@@ -167,7 +166,7 @@ transition_t state_table[MAX_STATES][MAX_EVENTS] =
 };
 
 /* =========================
- * Máquina de estados
+ * FSM (Finite State Machine)
  * ========================= */
 void smart_mirror_fsm(void)
 {
@@ -182,7 +181,7 @@ void smart_mirror_fsm(void)
 }
 
 /* =========================
- * Generación de eventos
+ * Event generation
  * ========================= */
 void get_new_event(void)
 {
@@ -210,12 +209,10 @@ void get_new_event(void)
 }
 
 /* =========================
- * Lectura de sensores
+ * Sensor readings and evaluations
  * ========================= */
 float read_ultrasonic_distance_cm(uint8_t trig_pin, uint8_t echo_pin)
 {
-  // TODO: implementar lectura real del HC-SR04
-
   static constexpr float SOUND_SPEED_CM_PER_US_HALF_TRIP = SOUND_SPEED_CM_PER_US / 2.0f;
   static constexpr unsigned long ECHO_TIMEOUT_US = MAX_TIMEOUT_US; // Equivalent to 200cm.
 
@@ -237,10 +234,6 @@ float read_ultrasonic_distance_cm(uint8_t trig_pin, uint8_t echo_pin)
 
 bool is_person_detected(float left_cm, float right_cm)
 {
-  // TODO:
-  // true si al menos uno de los sensores detecta una distancia
-  // menor o igual a PERSON_DETECTION_THRESHOLD_CM
-
   if((left_cm > INVALID_DISTANCE_CM) && (left_cm <= PERSON_DETECTION_THRESHOLD_CM))
   {
     return true;
@@ -256,8 +249,6 @@ bool is_person_detected(float left_cm, float right_cm)
 
 bool is_target_aligned(float left_cm, float right_cm)
 {
-  // TODO:
-  // true si abs(left_cm - right_cm) <= ALIGN_TOLERANCE_CM
   if(left_cm > INVALID_DISTANCE_CM && right_cm > INVALID_DISTANCE_CM)
   {
     if(abs(left_cm - right_cm) <= ALIGN_TOLERANCE_CM)
@@ -270,21 +261,16 @@ bool is_target_aligned(float left_cm, float right_cm)
 }
 
 /* =========================
- * Acciones de transición
+ * State transition actions
  * ========================= */
 void action_idle(void)
 {
-  // Opcional:
-  // mantener servo quieto o volver al centro
   center_servo();
   current_state = ST_IDLE;
 }
 
 void action_start_aligning(void)
 {
-  // TODO:
-  // decidir hacia qué lado mover el servo
-
   if(left_distance_cm == INVALID_DISTANCE_CM)
   {
     move_servo_right();
@@ -313,8 +299,6 @@ void action_start_aligning(void)
 
 void action_continue_aligning(void)
 {
-  // TODO:
-  // seguir corrigiendo según la diferencia entre sensores
 
   if(left_distance_cm == INVALID_DISTANCE_CM)
   {
@@ -349,7 +333,7 @@ void action_hold_aligned(void)
 }
 
 /* =========================
- * Acciones auxiliares sobre servo
+ * Auxilliary servo transition functions (move actions)
  * ========================= */
 void move_servo_left(void)
 {
@@ -398,7 +382,7 @@ void debug_print_transition(state_t state, event_t event)
 }
 
 /* =========================
- * Manejo de Luces
+ * Light strip management
  * ========================= */
 
 void update_light_control(void)
@@ -506,7 +490,7 @@ void setup()
 }
 
 /* =========================
- * Loop principal
+ * Main loop
  * ========================= */
 void loop()
 {
