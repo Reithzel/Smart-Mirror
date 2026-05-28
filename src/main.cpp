@@ -1,3 +1,4 @@
+#include <Arduino.h>
 #include <ESP32Servo.h>
 #include <Adafruit_NeoPixel.h>
 
@@ -22,6 +23,7 @@
 #define SERVO_MIN_ANGLE                 0
 #define SERVO_MAX_ANGLE                 180
 #define SERVO_STEP_ANGLE                1
+#define SERVO_SETTLE_TIME_MS            40
 
 #define SOUND_SPEED_CM_PER_US 0.0343f
 #define MAX_TIMEOUT_US 5830UL
@@ -37,22 +39,25 @@
 
 #define LED_MIN_BRIGHTNESS          0
 #define LED_MAX_BRIGHTNESS          255
-#define LED_FADE_STEP               5
+#define LED_FADE_STEP               4
 
 #define LED_WHITE_VALUE             255
 
-#define SERVO_TIMER_PERIOD_MS       50
-#define LED_TIMER_PERIOD_MS         100
-
 #define STACK_SIZE_TASKS          2048
-#define PRIORITY_LED_TASK            1
-#define PRIORITY_FSM_TASK            1
+#define FSM_TASK_PRIORITY            3
+#define ULTRASONIC_TASK_PRIORITY     2
+#define LDR_TASK_PRIORITY            1
 
-#define ULTRASONIC_READ_INTERVAL_MS 100
-#define LDR_READ_INTERVAL_MS        150
+#define EVENT_QUEUE_LENGTH           1
+
+#define ULTRASONIC_READ_INTERVAL_MS 80
+#define LDR_READ_INTERVAL_MS        100
 
 #define DISTANCE_CHANCE_THRESHOLD_CM  3.0f
-#define LDR_CHANGE_THRESHOLD          20
+#define LDR_CHANGE_THRESHOLD          25
+
+#define LOOP_IDLE_DELAY_MS            1000
+
 
 /* =========================
  * Enumerations for FSM states and events
@@ -76,6 +81,15 @@ typedef enum
 
 } event_t;
 
+typedef struct
+{
+  event_t type;
+  float left_distance_cm;
+  float right_distance_cm;
+  int ldr_value;
+  int target_led_brightness;
+} fsm_event_t;
+
 /* =========================
  * Transition function type definition
  * ========================= */
@@ -85,32 +99,33 @@ typedef void (*transition_t)(void);
  * Global variables for FSM
  * ========================= */
 state_t current_state = ST_IDLE;
-event_t new_event = EV_NO_TARGET;
+portMUX_TYPE fsm_state_mutex = portMUX_INITIALIZER_UNLOCKED;
+
+/* =========================
+ * Queues for servo and led events
+ * ========================= */
+QueueHandle_t servo_event_queue = NULL;
+QueueHandle_t light_event_queue = NULL;
 
 /* =========================
  * Global variables
  * ========================= */
 Servo mirrorServo;
 Adafruit_NeoPixel ledStrip(LED_STRIP_PIXEL_COUNT, LED_STRIP_PIN, NEO_GRB + NEO_KHZ800);
-TimerHandle_t servo_timer;
 TaskHandle_t fsm_task_handle;
-TimerHandle_t led_timer;
-TaskHandle_t led_task_handle;
+portMUX_TYPE servo_busy_mutex = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE led_brightness_mutex = portMUX_INITIALIZER_UNLOCKED;
 
 float left_distance_cm = INVALID_DISTANCE_CM;
 float right_distance_cm = INVALID_DISTANCE_CM;
 int current_servo_angle = SERVO_CENTER_ANGLE;
 int current_led_brightness = 0;
 int ldr_value = 0;
-unsigned long last_ultrasonic_read_time_ms = 0;
-unsigned long last_ldr_read_time_ms = 0;
-unsigned long current_time_ms = 0;
-bool read_ultrasonic = false;
-bool read_ldr = false;
 float previous_left_distance_cm = INVALID_DISTANCE_CM;
 float previous_right_distance_cm = INVALID_DISTANCE_CM;
 int previous_ldr_value = -1;
 int target_led_brightness = 0;
+unsigned long servo_busy_until_ms = 0;
 
 /* =========================
  * String for debug purposes
@@ -134,17 +149,24 @@ const char* event_names[MAX_EVENTS] =
 };
 
 /* =========================
- * Function declarations
- * ========================= */
+* Function declarations
+* ========================= */
 
 // FSM
-void smart_mirror_fsm(void);
-void get_new_event(void);
+void fsm_task(void* pvParameters);
+void dispatch_event(const fsm_event_t& event);
 
-// Reading sensors and evaluating
+// Reading sensors
 float read_ultrasonic_distance_cm(uint8_t trig_pin, uint8_t echo_pin);
+int read_ldr_value(void);
+
+// Evaluating sensor readings
 bool is_person_detected(float left_cm, float right_cm);
 bool is_target_aligned(float left_cm, float right_cm);
+bool has_relevant_distance_change(float left_cm, float right_cm);
+bool has_relevant_ldr_change(int ldr_value);
+bool has_time_elapsed(unsigned long now_ms, unsigned long target_ms);
+bool is_servo_busy(void);
 
 // State transition actions
 void action_idle(void);
@@ -152,8 +174,10 @@ void action_start_aligning(void);
 void action_continue_aligning(void);
 void action_hold_aligned(void);
 void action_none(void);
+void action_update_light(void);
+void action_fade_out_light(void);
 
-// Auxilliary actions
+// Auxiliary servo actions
 void move_servo_left(void);
 void move_servo_right(void);
 void hold_servo_position(void);
@@ -161,30 +185,36 @@ void center_servo(void);
 
 // Utility 
 void debug_print_transition(state_t state, event_t event);
-void servo_timer_callback(TimerHandle_t xTimer);
-void fsm_task(void* pvParameters);
-void led_timer_callback(TimerHandle_t xTimer);
-void led_task(void* pvParameters);
-void none(void);
-bool has_relevant_distance_change(float left_cm, float right_cm);
-bool has_relevant_ldr_change(int ldr_value);
+void mark_servo_busy(void);
+void create_queues(void);
+void create_tasks(void);
+
+// Getters and setters for servo and led states
+state_t get_current_state(void);
+void set_current_state(state_t state);
+int get_current_led_brightness(void);
+void set_current_led_brightness(int brightness);
 
 // Light management functions declarations
-void update_light_control(void);
-void update_leds_from_ldr(void);
-void fade_out_leds(void);
-int read_ldr_value(void);
 int calculate_led_brightness(int ldr_value);
 void set_led_brightness(int brightness);
 
-// New light management functions declarations
-void action_update_light(void);
-void action_fade_out_light(void);
+// Queue functions and helpers
+void enqueue_servo_event(const fsm_event_t& event);
+void enqueue_light_event(const fsm_event_t& event);
+void notify_fsm_task(void);
+
+// Servo task
+void ultrasonic_task(void* pvParameters);
+
+// Light task
+void ldr_task(void* pvParameters);
+
 
 /* =========================
- * State transition table
- * Rows = States
- * Columns = Events
+* State transition table
+* Rows = States
+* Columns = Events
  * ========================= */
 transition_t state_table[MAX_STATES][MAX_EVENTS] =
 {
@@ -227,123 +257,218 @@ transition_t state_table[MAX_STATES][MAX_EVENTS] =
 /* =========================
  * FSM (Finite State Machine)
  * ========================= */
-void smart_mirror_fsm(void)
-{
-  get_new_event();
 
-  if ((current_state >= 0) && (current_state < MAX_STATES) &&
-      (new_event >= 0) && (new_event < MAX_EVENTS))
+void fsm_task(void* pvParameters)
+{
+  (void)pvParameters;
+
+  fsm_event_t event;
+
+  while(true)
   {
-    debug_print_transition(current_state, new_event);
-    state_table[current_state][new_event]();
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    
+    while(true)
+    {
+      if(xQueueReceive(servo_event_queue, &event, 0) == pdTRUE)
+      {
+        dispatch_event(event);
+        continue;
+      }
+
+      if(xQueueReceive(light_event_queue, &event, 0) == pdTRUE)
+      {
+        dispatch_event(event);
+        continue;
+      }
+
+      break;
+    }
+  }
+}
+
+void dispatch_event(const fsm_event_t& event)
+{
+
+  const state_t actual_state = get_current_state();
+
+  if(event.type == EV_CONT)
+  {
+    return;
+  }
+
+  if ((actual_state >= 0) && (actual_state < MAX_STATES) &&
+      (event.type >= 0) && (event.type < MAX_EVENTS))
+  {
+    left_distance_cm = event.left_distance_cm;
+    right_distance_cm = event.right_distance_cm;
+    ldr_value = event.ldr_value;
+    target_led_brightness = event.target_led_brightness;
+
+    debug_print_transition(actual_state, event.type);
+    state_table[actual_state][event.type]();
   }
 }
 
 /* =========================
- * Event generation
+ * Event generation (tasks)
  * ========================= */
-void get_new_event(void)
+
+ void ultrasonic_task(void* pvParameters)
 {
-  current_time_ms = millis();
+  (void)pvParameters;
 
-  if(current_time_ms - last_ultrasonic_read_time_ms >= ULTRASONIC_READ_INTERVAL_MS) 
+  TickType_t last_wake_time = xTaskGetTickCount();
+
+  while(true)
   {
-    left_distance_cm = read_ultrasonic_distance_cm(ULTRASONIC_LEFT_TRIG_PIN, ULTRASONIC_LEFT_ECHO_PIN);
-    right_distance_cm = read_ultrasonic_distance_cm(ULTRASONIC_RIGHT_TRIG_PIN, ULTRASONIC_RIGHT_ECHO_PIN);
+    vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(ULTRASONIC_READ_INTERVAL_MS));
 
-    last_ultrasonic_read_time_ms = current_time_ms;
-    read_ultrasonic = true;
-  }
+    if(is_servo_busy())
+      continue;
 
-  if(current_time_ms - last_ldr_read_time_ms >= LDR_READ_INTERVAL_MS)
-  {
-    ldr_value = read_ldr_value();
+    const float new_left_distance_cm = read_ultrasonic_distance_cm(ULTRASONIC_LEFT_TRIG_PIN, ULTRASONIC_LEFT_ECHO_PIN);
+    const float new_right_distance_cm = read_ultrasonic_distance_cm(ULTRASONIC_RIGHT_TRIG_PIN, ULTRASONIC_RIGHT_ECHO_PIN);
 
-    last_ldr_read_time_ms = current_time_ms;
-    read_ldr = true;
-  }
+    const state_t actual_state = get_current_state();
 
-  if(read_ultrasonic)
-  {
-    read_ultrasonic = false;
-
-    if (!is_person_detected(left_distance_cm, right_distance_cm))
+    fsm_event_t event =
     {
-      previous_left_distance_cm = left_distance_cm;
-      previous_right_distance_cm = right_distance_cm;
+      EV_CONT,
+      new_left_distance_cm,
+      new_right_distance_cm,
+      ldr_value,
+      target_led_brightness
+    };
 
-      new_event = EV_NO_TARGET;
-      return;
+    if(!is_person_detected(new_left_distance_cm, new_right_distance_cm))
+    {
+      previous_left_distance_cm = new_left_distance_cm;
+      previous_right_distance_cm = new_right_distance_cm;
+
+      event.type = EV_NO_TARGET;
+      enqueue_servo_event(event);
+      continue;
     }
-    else if(current_state == ST_IDLE)
+    else if(actual_state == ST_IDLE)
     {
-      previous_left_distance_cm = left_distance_cm;
-      previous_right_distance_cm = right_distance_cm;      
+      previous_left_distance_cm = new_left_distance_cm;
+      previous_right_distance_cm = new_right_distance_cm;      
 
-      new_event = EV_TARGET_DETECTED;
-      return;
+      event.type = EV_TARGET_DETECTED;
+      enqueue_servo_event(event);
+      continue;
     }
 
-    if(!has_relevant_distance_change(left_distance_cm, right_distance_cm))
+    if(!has_relevant_distance_change(new_left_distance_cm, new_right_distance_cm) && actual_state != ST_ALIGNING)
+      continue;
+
+    if (is_target_aligned(new_left_distance_cm, new_right_distance_cm))
     {
-      new_event = EV_CONT;
-      return;
-    }
- 
-    if (is_target_aligned(left_distance_cm, right_distance_cm))
-    {
-      previous_left_distance_cm = left_distance_cm;
-      previous_right_distance_cm = right_distance_cm;
+      previous_left_distance_cm = new_left_distance_cm;
+      previous_right_distance_cm = new_right_distance_cm;
       
-      new_event = EV_TARGET_ALIGNED;
-      return;
+      event.type = EV_TARGET_ALIGNED;
+      enqueue_servo_event(event);
+      continue;
     }
 
-    // REVISAR PORQUE ESTO HACE QUE ANDE RARO, PENSAR LA LOGICA
+    previous_left_distance_cm = new_left_distance_cm;
+    previous_right_distance_cm = new_right_distance_cm;
 
-    previous_left_distance_cm = left_distance_cm;
-    previous_right_distance_cm = right_distance_cm;
-
-    new_event = EV_TARGET_MISALIGNED;
-    return;
+    event.type = EV_TARGET_MISALIGNED;
+    enqueue_servo_event(event);
   }
+}
 
-  if(read_ldr)
+void ldr_task(void* pvParameters)
+{
+  (void)pvParameters;
+
+  TickType_t last_wake_time = xTaskGetTickCount();
+  int latest_target_led_brightness = target_led_brightness;
+
+  while(true)
   {
-    read_ldr = false;
+    vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(LDR_READ_INTERVAL_MS));
+
+    const int new_ldr_value = read_ldr_value();
     
-    if(current_led_brightness != 0)
+    if(has_relevant_ldr_change(new_ldr_value))
     {
-      if (current_state == ST_IDLE)
-      {
-        previous_ldr_value = ldr_value;
-        new_event = EV_FADE_OUT_LIGHT;
-        return;
-      }
+      previous_ldr_value = new_ldr_value;
+      latest_target_led_brightness = calculate_led_brightness(new_ldr_value);
     }
 
-    if (has_relevant_ldr_change(ldr_value))
-    {
-      previous_ldr_value = ldr_value;
-      target_led_brightness = calculate_led_brightness(ldr_value);
+    const state_t actual_state = get_current_state();
+    const int current_brightness = get_current_led_brightness();
 
-      new_event = EV_UPDATE_LIGHT;
-      return;
+    fsm_event_t event =
+    {
+      EV_CONT,
+      left_distance_cm,
+      right_distance_cm,
+      new_ldr_value,
+      latest_target_led_brightness
+    };
+
+    if(actual_state == ST_IDLE && current_brightness > 0)
+    {
+      event.type = EV_FADE_OUT_LIGHT;
+      event.target_led_brightness = LED_MIN_BRIGHTNESS;
+      enqueue_light_event(event);
+      continue;
     }
 
-    if(current_led_brightness != target_led_brightness)
+    if(current_brightness != latest_target_led_brightness)
     {
-      new_event = EV_UPDATE_LIGHT;
-      return;
+      event.type = EV_UPDATE_LIGHT;
+      enqueue_light_event(event);
     }
   }
+}
 
-  new_event = EV_CONT;
+/* =========================
+ * Queue functions and helpers
+ * ========================= */
+
+void enqueue_servo_event(const fsm_event_t& event)
+{
+  if(event.type == EV_CONT)
+    return;
+
+  if(servo_event_queue == NULL)
+    return;
+
+  xQueueOverwrite(servo_event_queue, &event);
+  notify_fsm_task();
+}
+
+void enqueue_light_event(const fsm_event_t& event)
+{
+  if(event.type == EV_CONT)
+    return;
+
+  if(light_event_queue == NULL)
+    return;
+
+  xQueueOverwrite(light_event_queue, &event);
+  notify_fsm_task();
+}
+
+void notify_fsm_task(void)
+{
+  if(fsm_task_handle == NULL)
+    return;
+
+  xTaskNotifyGive(fsm_task_handle);
 }
 
 /* =========================
  * Sensor readings and evaluations
  * ========================= */
+
+ /** Servo and ultrasonic sensor related functions **/
 float read_ultrasonic_distance_cm(uint8_t trig_pin, uint8_t echo_pin)
 {
   static constexpr float SOUND_SPEED_CM_PER_US_HALF_TRIP = SOUND_SPEED_CM_PER_US / 2.0f;
@@ -393,13 +518,46 @@ bool is_target_aligned(float left_cm, float right_cm)
   return false;
 }
 
+void mark_servo_busy(void)
+{
+  const unsigned long busy_until_ms = millis() + SERVO_SETTLE_TIME_MS;
+
+  portENTER_CRITICAL(&servo_busy_mutex);
+  servo_busy_until_ms = busy_until_ms;
+  portEXIT_CRITICAL(&servo_busy_mutex);
+}
+
+bool has_time_elapsed(unsigned long now_ms, unsigned long target_ms)
+{
+  return ((long)(now_ms - target_ms) >= 0);
+}
+
+bool is_servo_busy(void)
+{
+  const unsigned long now_ms = millis();
+
+  portENTER_CRITICAL(&servo_busy_mutex);
+  const unsigned long busy_until_ms = servo_busy_until_ms;
+  portEXIT_CRITICAL(&servo_busy_mutex);
+
+  return !has_time_elapsed(now_ms, busy_until_ms);
+}
+
+ /** Light sensor related functions **/
+
+int read_ldr_value(void)
+{
+  return analogRead(LDR_PIN);
+}
+
 /* =========================
  * State transition actions
  * ========================= */
+
 void action_idle(void)
 {
   center_servo();
-  current_state = ST_IDLE;
+  set_current_state(ST_IDLE);
 }
 
 void action_start_aligning(void)
@@ -407,14 +565,14 @@ void action_start_aligning(void)
   if(left_distance_cm == INVALID_DISTANCE_CM)
   {
     move_servo_right();
-    current_state = ST_ALIGNING;
+    set_current_state(ST_ALIGNING);
     return;
   }
 
   if(right_distance_cm == INVALID_DISTANCE_CM)
   {
     move_servo_left();
-    current_state = ST_ALIGNING;
+    set_current_state(ST_ALIGNING);
     return;
   }
 
@@ -427,7 +585,7 @@ void action_start_aligning(void)
     move_servo_right();
   }
 
-  current_state = ST_ALIGNING;
+  set_current_state(ST_ALIGNING);
 }
 
 void action_continue_aligning(void)
@@ -436,14 +594,14 @@ void action_continue_aligning(void)
   if(left_distance_cm == INVALID_DISTANCE_CM)
   {
     move_servo_right();
-    current_state = ST_ALIGNING;
+    set_current_state(ST_ALIGNING);
     return;
   }
 
   if(right_distance_cm == INVALID_DISTANCE_CM)
   {
     move_servo_left();
-    current_state = ST_ALIGNING;
+    set_current_state(ST_ALIGNING);
     return;
   }
 
@@ -456,31 +614,33 @@ void action_continue_aligning(void)
     move_servo_right();
   }
 
-  current_state = ST_ALIGNING;
+  set_current_state(ST_ALIGNING);
 }
 
 void action_hold_aligned(void)
 {
   hold_servo_position();
-  current_state = ST_ALIGNED;
+  set_current_state(ST_ALIGNED);
 }
 
 void action_fade_out_light(void)
 {
-  set_led_brightness(max(current_led_brightness - LED_FADE_STEP, LED_MIN_BRIGHTNESS));
+  const int current_brightness = get_current_led_brightness();
+
+  set_led_brightness(max(current_brightness - LED_FADE_STEP, LED_MIN_BRIGHTNESS));
 }
 
 void action_update_light(void)
 {
-  //const int target_led_brightness = calculate_led_brightness(ldr_value);
+  const int current_brightness = get_current_led_brightness();
   
-  if (current_led_brightness < target_led_brightness)
+  if (current_brightness < target_led_brightness)
   {
-    set_led_brightness(min(current_led_brightness + LED_FADE_STEP, target_led_brightness));
+    set_led_brightness(min(current_brightness + LED_FADE_STEP, target_led_brightness));
   }
-  else if (current_led_brightness > target_led_brightness)
+  else if (current_brightness > target_led_brightness)
   {
-    set_led_brightness(max(current_led_brightness - LED_FADE_STEP, target_led_brightness));
+    set_led_brightness(max(current_brightness - LED_FADE_STEP, target_led_brightness));
   }
 }
 
@@ -492,8 +652,11 @@ void action_none(void)
 /* =========================
  * Auxilliary servo transition functions (move actions)
  * ========================= */
+
 void move_servo_left(void)
 {
+  const int previous_servo_angle = current_servo_angle;
+
   current_servo_angle -= SERVO_STEP_ANGLE;
 
   if (current_servo_angle < SERVO_MIN_ANGLE)
@@ -501,11 +664,17 @@ void move_servo_left(void)
     current_servo_angle = SERVO_MIN_ANGLE;
   }
 
-  mirrorServo.write(current_servo_angle);
+  if(current_servo_angle != previous_servo_angle)
+  {
+    mirrorServo.write(current_servo_angle);
+    mark_servo_busy();
+  }
 }
 
 void move_servo_right(void)
 {
+  const int previous_servo_angle = current_servo_angle;
+
   current_servo_angle += SERVO_STEP_ANGLE;
 
   if (current_servo_angle > SERVO_MAX_ANGLE)
@@ -513,7 +682,11 @@ void move_servo_right(void)
     current_servo_angle = SERVO_MAX_ANGLE;
   }
   
-  mirrorServo.write(current_servo_angle);
+  if(current_servo_angle != previous_servo_angle)
+  {
+    mirrorServo.write(current_servo_angle);
+    mark_servo_busy();
+  }
 }
 
 void hold_servo_position(void)
@@ -542,47 +715,43 @@ void debug_print_transition(state_t state, event_t event)
 }
 
 /* =========================
- * Light strip management
+ * Getters and setters for FSM state and LED brightness (with mutex protection)
  * ========================= */
 
-void update_light_control(void)
+state_t get_current_state(void)
 {
-  if (current_state == ST_IDLE)
-  {
-    fade_out_leds();
-    return;
-  }
-
-  update_leds_from_ldr();
+  portENTER_CRITICAL(&fsm_state_mutex);
+  const state_t state = current_state;
+  portEXIT_CRITICAL(&fsm_state_mutex);
+  return state;
+  
 }
 
-void update_leds_from_ldr(void)
+void set_current_state(state_t state)
 {
-  ldr_value = read_ldr_value();
-  const int target_brightness = calculate_led_brightness(ldr_value);
-
-  if (current_led_brightness < target_brightness)
-  {
-    set_led_brightness(min(current_led_brightness + LED_FADE_STEP, target_brightness));
-  }
-  else if (current_led_brightness > target_brightness)
-  {
-    set_led_brightness(max(current_led_brightness - LED_FADE_STEP, target_brightness));
-  }
+  portENTER_CRITICAL(&fsm_state_mutex);
+  current_state = state;
+  portEXIT_CRITICAL(&fsm_state_mutex);
 }
 
-void fade_out_leds(void)
+int get_current_led_brightness(void)
 {
-  if (current_led_brightness > LED_MIN_BRIGHTNESS)
-  {
-    set_led_brightness(max(current_led_brightness - LED_FADE_STEP, LED_MIN_BRIGHTNESS));
-  }
+  portENTER_CRITICAL(&led_brightness_mutex);
+  const int brightness = current_led_brightness;
+  portEXIT_CRITICAL(&led_brightness_mutex);
+  return brightness;
 }
 
-int read_ldr_value(void)
+void set_current_led_brightness(int brightness)
 {
-  return analogRead(LDR_PIN);
+  portENTER_CRITICAL(&led_brightness_mutex);
+  current_led_brightness = brightness;
+  portEXIT_CRITICAL(&led_brightness_mutex);
 }
+
+/* =========================
+ * Light strip management
+ * ========================= */
 
 int calculate_led_brightness(int ldr_value)
 {
@@ -602,14 +771,17 @@ int calculate_led_brightness(int ldr_value)
 
 void set_led_brightness(int brightness)
 {
+  const int current_brightness = get_current_led_brightness();
+
   brightness = constrain(brightness, LED_MIN_BRIGHTNESS, LED_MAX_BRIGHTNESS);
 
-  if (brightness == current_led_brightness)
+  if (brightness == current_brightness)
   {
     return;
   }
 
-  current_led_brightness = brightness;
+  set_current_led_brightness(brightness);
+
   ledStrip.setBrightness(current_led_brightness);
 
   for (uint16_t i = 0; i < LED_STRIP_PIXEL_COUNT; i++)
@@ -621,36 +793,8 @@ void set_led_brightness(int brightness)
 }
 
 /* =========================
- * Timer callback for servo adjustments
+ * Deadband evaluation functions
  * ========================= */
-
-void servo_timer_callback(TimerHandle_t xTimer) 
-{
-  xTaskNotifyGive(fsm_task_handle);
-}
-
-void led_timer_callback(TimerHandle_t xTimer) 
-{
-  xTaskNotifyGive(led_task_handle);
-}
-
-void fsm_task(void* pvParameters)
-{
-  while (true)
-  {
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    smart_mirror_fsm();
-  }
-}
-
-void led_task(void* pvParameters)
-{
-  while (true)
-  {
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    update_light_control();
-  }
-}
 
 bool has_relevant_distance_change(float left_cm, float right_cm)
 {
@@ -684,8 +828,31 @@ bool has_relevant_ldr_change(int ldr_value)
 }
 
 /* =========================
+ * Setup auxiliary functions
+ * ========================= */
+
+void create_queues(void)
+{
+  servo_event_queue = xQueueCreate(EVENT_QUEUE_LENGTH, sizeof(fsm_event_t));
+  light_event_queue = xQueueCreate(EVENT_QUEUE_LENGTH, sizeof(fsm_event_t));
+
+  if (servo_event_queue == NULL || light_event_queue == NULL)
+  {
+    Serial.println("[Setup] Error creating queues");
+  }
+}
+
+void create_tasks(void)
+{
+  xTaskCreate(fsm_task, "FSM Task", STACK_SIZE_TASKS, NULL, FSM_TASK_PRIORITY, &fsm_task_handle);
+  xTaskCreate(ultrasonic_task, "Ultrasonic Task", STACK_SIZE_TASKS, NULL, ULTRASONIC_TASK_PRIORITY, NULL);
+  xTaskCreate(ldr_task, "LED Task", STACK_SIZE_TASKS, NULL, LDR_TASK_PRIORITY, NULL);
+}
+
+/* =========================
  * Setup
  * ========================= */
+
 void setup()
 {
   Serial.begin(DEBUG_SERIAL_BAUDRATE);
@@ -706,22 +873,17 @@ void setup()
   mirrorServo.write(SERVO_CENTER_ANGLE);
   current_servo_angle = SERVO_CENTER_ANGLE;
 
-  current_state = ST_IDLE;
-  new_event = EV_NO_TARGET;
+  set_current_state(ST_IDLE);
 
-  //xTaskCreate(fsm_task, "FSM Task", STACK_SIZE_TASKS, NULL, PRIORITY_FSM_TASK, &fsm_task_handle);
-  //xTaskCreate(led_task, "LED Task", STACK_SIZE_TASKS, NULL, PRIORITY_LED_TASK, &led_task_handle);
+  create_queues();
 
-  servo_timer = xTimerCreate("ServoTimer", pdMS_TO_TICKS(SERVO_TIMER_PERIOD_MS), pdTRUE, NULL, servo_timer_callback);
-  led_timer = xTimerCreate("LEDTimer", pdMS_TO_TICKS(LED_TIMER_PERIOD_MS), pdTRUE, NULL, led_timer_callback);
-  //xTimerStart(servo_timer, 0);
-  //xTimerStart(led_timer, 0);
+  create_tasks();
 }
 
 /* =========================
- * Main loop (not in use because we use tasks and timers)
+ * Main loop (not in use because we use tasks)
  * ========================= */
 void loop()
 {
-  smart_mirror_fsm();
+  vTaskDelay(pdMS_TO_TICKS(LOOP_IDLE_DELAY_MS));
 }
