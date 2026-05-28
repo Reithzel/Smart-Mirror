@@ -7,7 +7,7 @@
 #define DEBUG_SERIAL_BAUDRATE      115200
 
 #define MAX_STATES                 3
-#define MAX_EVENTS                 4
+#define MAX_EVENTS                 7
 
 #define SERVO_PIN                  5
 #define ULTRASONIC_LEFT_TRIG_PIN   22
@@ -48,6 +48,12 @@
 #define PRIORITY_LED_TASK            1
 #define PRIORITY_FSM_TASK            1
 
+#define ULTRASONIC_READ_INTERVAL_MS 100
+#define LDR_READ_INTERVAL_MS        150
+
+#define DISTANCE_CHANCE_THRESHOLD_CM  3.0f
+#define LDR_CHANGE_THRESHOLD          20
+
 /* =========================
  * Enumerations for FSM states and events
  * ========================= */
@@ -60,10 +66,14 @@ typedef enum
 
 typedef enum
 {
-  EV_NO_TARGET = 0,
+  EV_CONT = 0,
+  EV_NO_TARGET,
   EV_TARGET_DETECTED,
   EV_TARGET_MISALIGNED,
-  EV_TARGET_ALIGNED
+  EV_TARGET_ALIGNED,
+  EV_FADE_OUT_LIGHT,
+  EV_UPDATE_LIGHT
+
 } event_t;
 
 /* =========================
@@ -92,6 +102,15 @@ float right_distance_cm = INVALID_DISTANCE_CM;
 int current_servo_angle = SERVO_CENTER_ANGLE;
 int current_led_brightness = 0;
 int ldr_value = 0;
+unsigned long last_ultrasonic_read_time_ms = 0;
+unsigned long last_ldr_read_time_ms = 0;
+unsigned long current_time_ms = 0;
+bool read_ultrasonic = false;
+bool read_ldr = false;
+float previous_left_distance_cm = INVALID_DISTANCE_CM;
+float previous_right_distance_cm = INVALID_DISTANCE_CM;
+int previous_ldr_value = -1;
+int target_led_brightness = 0;
 
 /* =========================
  * String for debug purposes
@@ -105,10 +124,13 @@ const char* state_names[MAX_STATES] =
 
 const char* event_names[MAX_EVENTS] =
 {
+  "EV_CONT",
   "EV_NO_TARGET",
   "EV_TARGET_DETECTED",
   "EV_TARGET_MISALIGNED",
-  "EV_TARGET_ALIGNED"
+  "EV_TARGET_ALIGNED",
+  "EV_FADE_OUT_LIGHT",
+  "EV_UPDATE_LIGHT"
 };
 
 /* =========================
@@ -129,6 +151,7 @@ void action_idle(void);
 void action_start_aligning(void);
 void action_continue_aligning(void);
 void action_hold_aligned(void);
+void action_none(void);
 
 // Auxilliary actions
 void move_servo_left(void);
@@ -142,6 +165,9 @@ void servo_timer_callback(TimerHandle_t xTimer);
 void fsm_task(void* pvParameters);
 void led_timer_callback(TimerHandle_t xTimer);
 void led_task(void* pvParameters);
+void none(void);
+bool has_relevant_distance_change(float left_cm, float right_cm);
+bool has_relevant_ldr_change(int ldr_value);
 
 // Light management functions declarations
 void update_light_control(void);
@@ -150,6 +176,10 @@ void fade_out_leds(void);
 int read_ldr_value(void);
 int calculate_led_brightness(int ldr_value);
 void set_led_brightness(int brightness);
+
+// New light management functions declarations
+void action_update_light(void);
+void action_fade_out_light(void);
 
 /* =========================
  * State transition table
@@ -160,26 +190,35 @@ transition_t state_table[MAX_STATES][MAX_EVENTS] =
 {
   // ST_IDLE
   {
+    action_none,              // EV_CONT
     action_idle,              // EV_NO_TARGET
     action_start_aligning,    // EV_TARGET_DETECTED
-    action_idle,              // EV_TARGET_MISALIGNED
-    action_idle               // EV_TARGET_ALIGNED
+    action_none,              // EV_TARGET_MISALIGNED
+    action_none,              // EV_TARGET_ALIGNED
+    action_fade_out_light,    // EV_FADE_OUT_LIGHT
+    action_none               // EV_UPDATE_LIGHT
   },
 
   // ST_ALIGNING
   {
+    action_none,              // EV_CONT
     action_idle,              // EV_NO_TARGET
     action_continue_aligning, // EV_TARGET_DETECTED
     action_continue_aligning, // EV_TARGET_MISALIGNED
-    action_hold_aligned       // EV_TARGET_ALIGNED
-  },
+    action_hold_aligned,      // EV_TARGET_ALIGNED
+    action_none,              // EV_FADE_OUT_LIGHT
+    action_update_light       // EV_UPDATE_LIGHT
+  },  
 
   // ST_ALIGNED
   {
+    action_none,              // EV_CONT
     action_idle,              // EV_NO_TARGET
     action_hold_aligned,      // EV_TARGET_DETECTED
     action_continue_aligning, // EV_TARGET_MISALIGNED
-    action_hold_aligned       // EV_TARGET_ALIGNED
+    action_hold_aligned,      // EV_TARGET_ALIGNED
+    action_none,              // EV_FADE_OUT_LIGHT 
+    action_update_light       // EV_UPDATE_LIGHT
   }
 };
 
@@ -205,27 +244,101 @@ void smart_mirror_fsm(void)
  * ========================= */
 void get_new_event(void)
 {
-  left_distance_cm = read_ultrasonic_distance_cm(ULTRASONIC_LEFT_TRIG_PIN, ULTRASONIC_LEFT_ECHO_PIN);
-  right_distance_cm = read_ultrasonic_distance_cm(ULTRASONIC_RIGHT_TRIG_PIN, ULTRASONIC_RIGHT_ECHO_PIN);
+  current_time_ms = millis();
 
-  if (!is_person_detected(left_distance_cm, right_distance_cm))
+  if(current_time_ms - last_ultrasonic_read_time_ms >= ULTRASONIC_READ_INTERVAL_MS) 
   {
-    new_event = EV_NO_TARGET;
-    return;
-  }
-  else if(current_state == ST_IDLE)
-  {
-    new_event = EV_TARGET_DETECTED;
-    return;
+    left_distance_cm = read_ultrasonic_distance_cm(ULTRASONIC_LEFT_TRIG_PIN, ULTRASONIC_LEFT_ECHO_PIN);
+    right_distance_cm = read_ultrasonic_distance_cm(ULTRASONIC_RIGHT_TRIG_PIN, ULTRASONIC_RIGHT_ECHO_PIN);
+
+    last_ultrasonic_read_time_ms = current_time_ms;
+    read_ultrasonic = true;
   }
 
-  if (is_target_aligned(left_distance_cm, right_distance_cm))
+  if(current_time_ms - last_ldr_read_time_ms >= LDR_READ_INTERVAL_MS)
   {
-    new_event = EV_TARGET_ALIGNED;
+    ldr_value = read_ldr_value();
+
+    last_ldr_read_time_ms = current_time_ms;
+    read_ldr = true;
+  }
+
+  if(read_ultrasonic)
+  {
+    read_ultrasonic = false;
+
+    if (!is_person_detected(left_distance_cm, right_distance_cm))
+    {
+      previous_left_distance_cm = left_distance_cm;
+      previous_right_distance_cm = right_distance_cm;
+
+      new_event = EV_NO_TARGET;
+      return;
+    }
+    else if(current_state == ST_IDLE)
+    {
+      previous_left_distance_cm = left_distance_cm;
+      previous_right_distance_cm = right_distance_cm;      
+
+      new_event = EV_TARGET_DETECTED;
+      return;
+    }
+
+    if(!has_relevant_distance_change(left_distance_cm, right_distance_cm))
+    {
+      new_event = EV_CONT;
+      return;
+    }
+ 
+    if (is_target_aligned(left_distance_cm, right_distance_cm))
+    {
+      previous_left_distance_cm = left_distance_cm;
+      previous_right_distance_cm = right_distance_cm;
+      
+      new_event = EV_TARGET_ALIGNED;
+      return;
+    }
+
+    // REVISAR PORQUE ESTO HACE QUE ANDE RARO, PENSAR LA LOGICA
+
+    previous_left_distance_cm = left_distance_cm;
+    previous_right_distance_cm = right_distance_cm;
+
+    new_event = EV_TARGET_MISALIGNED;
     return;
   }
 
-  new_event = EV_TARGET_MISALIGNED;
+  if(read_ldr)
+  {
+    read_ldr = false;
+    
+    if(current_led_brightness != 0)
+    {
+      if (current_state == ST_IDLE)
+      {
+        previous_ldr_value = ldr_value;
+        new_event = EV_FADE_OUT_LIGHT;
+        return;
+      }
+    }
+
+    if (has_relevant_ldr_change(ldr_value))
+    {
+      previous_ldr_value = ldr_value;
+      target_led_brightness = calculate_led_brightness(ldr_value);
+
+      new_event = EV_UPDATE_LIGHT;
+      return;
+    }
+
+    if(current_led_brightness != target_led_brightness)
+    {
+      new_event = EV_UPDATE_LIGHT;
+      return;
+    }
+  }
+
+  new_event = EV_CONT;
 }
 
 /* =========================
@@ -352,6 +465,30 @@ void action_hold_aligned(void)
   current_state = ST_ALIGNED;
 }
 
+void action_fade_out_light(void)
+{
+  set_led_brightness(max(current_led_brightness - LED_FADE_STEP, LED_MIN_BRIGHTNESS));
+}
+
+void action_update_light(void)
+{
+  //const int target_led_brightness = calculate_led_brightness(ldr_value);
+  
+  if (current_led_brightness < target_led_brightness)
+  {
+    set_led_brightness(min(current_led_brightness + LED_FADE_STEP, target_led_brightness));
+  }
+  else if (current_led_brightness > target_led_brightness)
+  {
+    set_led_brightness(max(current_led_brightness - LED_FADE_STEP, target_led_brightness));
+  }
+}
+
+void action_none(void)
+{
+  // No state change, no action.
+}
+
 /* =========================
  * Auxilliary servo transition functions (move actions)
  * ========================= */
@@ -395,10 +532,13 @@ void center_servo(void)
  * ========================= */
 void debug_print_transition(state_t state, event_t event)
 {
-  Serial.print("[FSM] State: ");
-  Serial.print(state_names[state]);
-  Serial.print(" | Event: ");
-  Serial.println(event_names[event]);
+  if(event != EV_CONT)
+  {
+    Serial.print("[FSM] State: ");
+    Serial.print(state_names[state]);
+    Serial.print(" | Event: ");
+    Serial.println(event_names[event]);
+  }
 }
 
 /* =========================
@@ -512,6 +652,37 @@ void led_task(void* pvParameters)
   }
 }
 
+bool has_relevant_distance_change(float left_cm, float right_cm)
+{
+  if (previous_left_distance_cm == INVALID_DISTANCE_CM || previous_right_distance_cm == INVALID_DISTANCE_CM)
+  {
+    return true;
+  }
+
+  if (abs(left_cm - previous_left_distance_cm) >= DISTANCE_CHANCE_THRESHOLD_CM ||
+      abs(right_cm - previous_right_distance_cm) >= DISTANCE_CHANCE_THRESHOLD_CM)
+  {
+    return true;
+  }
+
+  return false;
+}
+
+bool has_relevant_ldr_change(int ldr_value)
+{
+  if (previous_ldr_value == -1)
+  {
+    return true;
+  }
+
+  if (abs(ldr_value - previous_ldr_value) >= LDR_CHANGE_THRESHOLD)
+  {
+    return true;
+  }
+
+  return false;
+}
+
 /* =========================
  * Setup
  * ========================= */
@@ -538,13 +709,13 @@ void setup()
   current_state = ST_IDLE;
   new_event = EV_NO_TARGET;
 
-  xTaskCreate(fsm_task, "FSM Task", STACK_SIZE_TASKS, NULL, PRIORITY_FSM_TASK, &fsm_task_handle);
-  xTaskCreate(led_task, "LED Task", STACK_SIZE_TASKS, NULL, PRIORITY_LED_TASK, &led_task_handle);
+  //xTaskCreate(fsm_task, "FSM Task", STACK_SIZE_TASKS, NULL, PRIORITY_FSM_TASK, &fsm_task_handle);
+  //xTaskCreate(led_task, "LED Task", STACK_SIZE_TASKS, NULL, PRIORITY_LED_TASK, &led_task_handle);
 
   servo_timer = xTimerCreate("ServoTimer", pdMS_TO_TICKS(SERVO_TIMER_PERIOD_MS), pdTRUE, NULL, servo_timer_callback);
   led_timer = xTimerCreate("LEDTimer", pdMS_TO_TICKS(LED_TIMER_PERIOD_MS), pdTRUE, NULL, led_timer_callback);
-  xTimerStart(servo_timer, 0);
-  xTimerStart(led_timer, 0);
+  //xTimerStart(servo_timer, 0);
+  //xTimerStart(led_timer, 0);
 }
 
 /* =========================
@@ -552,5 +723,5 @@ void setup()
  * ========================= */
 void loop()
 {
-
+  smart_mirror_fsm();
 }
