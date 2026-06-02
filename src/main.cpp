@@ -10,11 +10,11 @@
 #define MAX_STATES                 3
 #define MAX_EVENTS                 7
 
-#define SERVO_PIN                  5
-#define ULTRASONIC_LEFT_TRIG_PIN   22
-#define ULTRASONIC_LEFT_ECHO_PIN   23
-#define ULTRASONIC_RIGHT_TRIG_PIN  19
-#define ULTRASONIC_RIGHT_ECHO_PIN  21
+#define SERVO_PIN                  4
+#define ULTRASONIC_LEFT_TRIG_PIN   26
+#define ULTRASONIC_LEFT_ECHO_PIN   27  
+#define ULTRASONIC_RIGHT_TRIG_PIN  12
+#define ULTRASONIC_RIGHT_ECHO_PIN  14
 
 #define PERSON_DETECTION_THRESHOLD_CM   80.0f
 #define ALIGN_TOLERANCE_CM              5.0f
@@ -23,7 +23,7 @@
 #define SERVO_MIN_ANGLE                 0
 #define SERVO_MAX_ANGLE                 180
 #define SERVO_STEP_ANGLE                1
-#define SERVO_SETTLE_TIME_MS            40
+#define SERVO_SETTLE_TIME_MS            20
 
 #define SOUND_SPEED_CM_PER_US 0.0343f
 #define MAX_TIMEOUT_US 5830UL
@@ -31,7 +31,7 @@
 
 #define LDR_PIN                     34
 
-#define LED_STRIP_PIN               18
+#define LED_STRIP_PIN               19
 #define LED_STRIP_PIXEL_COUNT       16
 
 #define LDR_DARK_VALUE              3000
@@ -50,7 +50,7 @@
 
 #define EVENT_QUEUE_LENGTH           1
 
-#define ULTRASONIC_READ_INTERVAL_MS 80
+#define ULTRASONIC_READ_INTERVAL_MS 30
 #define LDR_READ_INTERVAL_MS        100
 
 #define DISTANCE_CHANCE_THRESHOLD_CM  3.0f
@@ -696,8 +696,8 @@ void hold_servo_position(void)
 
 void center_servo(void)
 {
-  current_servo_angle = SERVO_CENTER_ANGLE;
-  mirrorServo.write(current_servo_angle);
+  //current_servo_angle = SERVO_CENTER_ANGLE;
+  //mirrorServo.write(current_servo_angle);
 }
 
 /* =========================
@@ -757,15 +757,15 @@ int calculate_led_brightness(int ldr_value)
 {
   if (ldr_value <= LDR_BRIGHT_VALUE)
   {
-    return LED_MIN_BRIGHTNESS;
+    return LED_MAX_BRIGHTNESS;
   }
 
   if (ldr_value >= LDR_DARK_VALUE)
   {
-    return LED_MAX_BRIGHTNESS;
+    return LED_MIN_BRIGHTNESS;
   }
 
-  return ((ldr_value - LDR_BRIGHT_VALUE) * LED_MAX_BRIGHTNESS) /
+  return ((LDR_DARK_VALUE - ldr_value) * LED_MAX_BRIGHTNESS) /
          (LDR_DARK_VALUE - LDR_BRIGHT_VALUE);
 }
 
