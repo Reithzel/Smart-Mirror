@@ -84,13 +84,6 @@
 			"attrs": { "value": "1000" }
 		},
 		{
-			"type": "wokwi-resistor",
-			"id": "r7",
-			"top": 195.95,
-			"left": 105.6,
-			"attrs": { "value": "330" }
-		},
-		{
 			"type": "wokwi-led-strip",
 			"id": "strip2",
 			"top": 251.7,
@@ -178,10 +171,9 @@
 		],
 		["ldr1:GND", "bb1:tn.11", "black", ["v0"]],
 		["ldr1:AO", "esp:D34", "blue", ["v9.6", "h-220.3"]],
-		["r7:1", "esp:D18", "green", ["v0", "h-595.2"]],
 		["bb1:tp.47", "strip2:VDD.2", "red", ["v0"]],
 		["bb1:tn.48", "strip2:VSS.2", "black", ["v0"]],
-		["r7:2", "strip1:DIN", "green", ["h181.2", "v86.8"]],
+		["esp:D18", "strip1:DIN", "green", ["v0", "h173"]],
 		["ultrasonic2:VCC", "bb1:tp.42", "red", ["v0"]],
 		["esp:D5", "servo1:PWM", "green", ["v66.9", "h173"]],
 		["servo1:V+", "bb1:bp.3", "red", ["v0"]],
