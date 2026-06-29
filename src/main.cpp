@@ -8,10 +8,10 @@
  * Definitions and constants
  * ========================= */
 #define DEBUG_SERIAL_BAUDRATE        115200
-#define WIFI_SSID                    "YourWiFiSSID"
-#define WIFI_PASSWORD                "YourWiFiPassword"
+#define WIFI_SSID                    "SO Avanzados"
+#define WIFI_PASSWORD                "SOA.2019"
 
-#define MQTT_BROKER_HOST             "192.168.1.100"
+#define MQTT_BROKER_HOST             "192.168.30.220"
 #define MQTT_BROKER_PORT             1883
 #define MQTT_CLIENT_ID               "smart_mirror_esp32"
 #define MQTT_RECONNECT_DELAY_MS      3000
@@ -33,11 +33,11 @@
 #define MAX_STATES                 3
 #define MAX_EVENTS                 13
 
-#define SERVO_PIN                  5
-#define ULTRASONIC_LEFT_TRIG_PIN   22
-#define ULTRASONIC_LEFT_ECHO_PIN   23  
-#define ULTRASONIC_RIGHT_TRIG_PIN  19
-#define ULTRASONIC_RIGHT_ECHO_PIN  21
+#define SERVO_PIN                  13
+#define ULTRASONIC_LEFT_TRIG_PIN   15
+#define ULTRASONIC_LEFT_ECHO_PIN   2  
+#define ULTRASONIC_RIGHT_TRIG_PIN  23
+#define ULTRASONIC_RIGHT_ECHO_PIN  22
 
 #define PERSON_DETECTION_THRESHOLD_CM   80.0f
 #define ALIGN_TOLERANCE_CM              5.0f
@@ -49,12 +49,12 @@
 #define SERVO_SETTLE_TIME_MS            20
 
 #define SOUND_SPEED_CM_PER_US 0.0343f
-#define MAX_TIMEOUT_US 5830UL
+#define MAX_TIMEOUT_US 4500UL
 #define INVALID_DISTANCE_CM            -1.0f
 
 #define LDR_PIN                     34
 
-#define LED_STRIP_PIN               18
+#define LED_STRIP_PIN               14
 #define LED_STRIP_PIXEL_COUNT       16
 
 #define LDR_DARK_VALUE              3000
