@@ -21,14 +21,17 @@
 #define MQTT_TOPIC_SENSOR_DISTANCE_1   "espejo/sensor/distancia1"
 #define MQTT_TOPIC_SENSOR_DISTANCE_2   "espejo/sensor/distancia2"
 #define MQTT_TOPIC_SENSOR_LIGHT        "espejo/sensor/luz"
-  
+ 
+#define MQTT_TOPIC_CONTROL_MODE        "espejo/control/modo"
+#define MQTT_TOPIC_CONTROL_SERVO       "espejo/control/servo"
+#define MQTT_TOPIC_CONTROL_LIGHT       "espejo/control/luz"
 #define MQTT_TOPIC_CONTROL_LED         "espejo/control/led"
 
 #define WIFI_CONNECT_TIMEOUT_MS      10000
 #define WIFI_RETRY_DELAY_MS            500
 
 #define MAX_STATES                 3
-#define MAX_EVENTS                 9
+#define MAX_EVENTS                 13
 
 #define SERVO_PIN                  5
 #define ULTRASONIC_LEFT_TRIG_PIN   22
@@ -80,6 +83,9 @@
 
 #define LOOP_IDLE_DELAY_MS            1000
 
+#define UNUSED_SERVO_ANGLE    -1
+#define UNUSED_LED_BRIGHTNESS -1
+
 
 /* =========================
  * Enumerations for FSM states and events
@@ -101,7 +107,11 @@ typedef enum
   EV_FADE_OUT_LIGHT,
   EV_UPDATE_LIGHT,
   EV_MQTT_LIGHT_OFF,
-  EV_MQTT_LIGHT_ON
+  EV_MQTT_LIGHT_ON,
+  EV_MQTT_MODE_MANUAL,
+  EV_MQTT_MODE_AUTO,
+  EV_MQTT_SET_SERVO,
+  EV_MQTT_SET_LIGHT
 
 } event_t;
 
@@ -112,13 +122,14 @@ typedef struct
   float right_distance_cm;
   int ldr_value;
   int target_led_brightness;
+  int servo_angle;
+  int led_brightness;
 } fsm_event_t;
-
 typedef enum
 {
-  LIGHT_MODE_AUTO = 0,
-  LIGHT_MODE_MANUAL_OFF
-} light_mode_t;
+  CONTROL_MODE_AUTO = 0,
+  CONTROL_MODE_MANUAL
+} control_mode_t;
 
 /* =========================
  * Transition function type definition
@@ -132,10 +143,11 @@ state_t current_state = ST_IDLE;
 portMUX_TYPE fsm_state_mutex = portMUX_INITIALIZER_UNLOCKED;
 
 /* =========================
- * Queues for servo and led events
+ * Queues for servo and led events and for mqtt events
  * ========================= */
 QueueHandle_t servo_event_queue = NULL;
 QueueHandle_t light_event_queue = NULL;
+QueueHandle_t mqtt_event_queue = NULL;
 
 /* =========================
  * Global variables
@@ -145,9 +157,10 @@ Adafruit_NeoPixel ledStrip(LED_STRIP_PIXEL_COUNT, LED_STRIP_PIN, NEO_GRB + NEO_K
 TaskHandle_t fsm_task_handle;
 portMUX_TYPE servo_busy_mutex = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE led_brightness_mutex = portMUX_INITIALIZER_UNLOCKED;
-portMUX_TYPE light_mode_mutex = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE control_mode_mutex = portMUX_INITIALIZER_UNLOCKED;
 WiFiClient wifiClient;
 PubSubClient mqttClient(wifiClient);
+control_mode_t current_control_mode = CONTROL_MODE_AUTO;
 
 float left_distance_cm = INVALID_DISTANCE_CM;
 float right_distance_cm = INVALID_DISTANCE_CM;
@@ -159,7 +172,8 @@ float previous_right_distance_cm = INVALID_DISTANCE_CM;
 int previous_ldr_value = -1;
 int target_led_brightness = 0;
 unsigned long servo_busy_until_ms = 0;
-light_mode_t current_light_mode = LIGHT_MODE_AUTO;
+int mqtt_servo_angle = UNUSED_SERVO_ANGLE;
+int mqtt_led_brightness = UNUSED_LED_BRIGHTNESS;
 
 
 /* =========================
@@ -182,7 +196,11 @@ const char* event_names[MAX_EVENTS] =
   "EV_FADE_OUT_LIGHT",
   "EV_UPDATE_LIGHT",
   "EV_MQTT_LIGHT_OFF",
-  "EV_MQTT_LIGHT_ON"
+  "EV_MQTT_LIGHT_ON",
+  "EV_MQTT_MODE_MANUAL",
+  "EV_MQTT_MODE_AUTO",
+  "EV_MQTT_SET_SERVO",
+  "EV_MQTT_SET_LIGHT"
 };
 
 /* =========================
@@ -213,8 +231,13 @@ void action_hold_aligned(void);
 void action_none(void);
 void action_update_light(void);
 void action_fade_out_light(void);
+
 void action_mqtt_light_off(void);
 void action_mqtt_light_on(void);
+void action_mqtt_mode_manual(void);
+void action_mqtt_mode_auto(void);
+void action_mqtt_set_servo(void);
+void action_mqtt_set_light(void);
 
 // Auxiliary servo actions
 void move_servo_left(void);
@@ -228,21 +251,23 @@ void mark_servo_busy(void);
 void create_queues(void);
 void create_tasks(void);
 
-// Getters and setters for servo and led states
+// Getters and setters
 state_t get_current_state(void);
 void set_current_state(state_t state);
 int get_current_led_brightness(void);
 void set_current_led_brightness(int brightness);
+control_mode_t get_current_control_mode(void);
+void set_current_control_mode(control_mode_t mode);
 
 // Light management functions declarations
 int calculate_led_brightness(int ldr_value);
 void set_led_brightness(int brightness);
-light_mode_t get_current_light_mode(void);
-void set_current_light_mode(light_mode_t mode);
 
 // Queue functions and helpers
 void enqueue_servo_event(const fsm_event_t& event);
 void enqueue_light_event(const fsm_event_t& event);
+void enqueue_mqtt_event(const fsm_event_t& event);
+void enqueue_mqtt_event_type(event_t event_type);
 void notify_fsm_task(void);
 
 // Servo task
@@ -256,7 +281,6 @@ void mqtt_task(void* pvParameters);
 void mqtt_callback(char* topic, byte* payload, unsigned int length);
 void connect_wifi(void);
 bool connect_mqtt(void);
-void enqueue_mqtt_light_event(event_t event_type);
 void publish_mqtt_telemetry(void);
 
 
@@ -277,7 +301,11 @@ transition_t state_table[MAX_STATES][MAX_EVENTS] =
     action_fade_out_light,     // EV_FADE_OUT_LIGHT
     action_none,               // EV_UPDATE_LIGHT
     action_mqtt_light_off,     // EV_MQTT_LIGHT_OFF
-    action_mqtt_light_on       // EV_MQTT_LIGHT_ON
+    action_mqtt_light_on,      // EV_MQTT_LIGHT_ON
+    action_mqtt_mode_manual,   // EV_MQTT_MODE_MANUAL
+    action_mqtt_mode_auto,      // EV_MQTT_MODE_AUTO
+    action_mqtt_set_servo,     // EV_MQTT_SET_SERVO
+    action_mqtt_set_light      // EV_MQTT_SET_LIGHT
   },
 
   // ST_ALIGNING
@@ -290,7 +318,11 @@ transition_t state_table[MAX_STATES][MAX_EVENTS] =
     action_none,               // EV_FADE_OUT_LIGHT
     action_update_light,       // EV_UPDATE_LIGHT
     action_mqtt_light_off,     // EV_MQTT_LIGHT_OFF
-    action_mqtt_light_on       // EV_MQTT_LIGHT_ON
+    action_mqtt_light_on,      // EV_MQTT_LIGHT_ON
+    action_mqtt_mode_manual,   // EV_MQTT_MODE_MANUAL
+    action_mqtt_mode_auto,      // EV_MQTT_MODE_AUTO
+    action_mqtt_set_servo,     // EV_MQTT_SET_SERVO
+    action_mqtt_set_light      // EV_MQTT_SET_LIGHT
   },  
 
   // ST_ALIGNED
@@ -303,7 +335,11 @@ transition_t state_table[MAX_STATES][MAX_EVENTS] =
     action_none,               // EV_FADE_OUT_LIGHT 
     action_update_light,       // EV_UPDATE_LIGHT
     action_mqtt_light_off,     // EV_MQTT_LIGHT_OFF
-    action_mqtt_light_on       // EV_MQTT_LIGHT_ON
+    action_mqtt_light_on,      // EV_MQTT_LIGHT_ON
+    action_mqtt_mode_manual,   // EV_MQTT_MODE_MANUAL
+    action_mqtt_mode_auto,      // EV_MQTT_MODE_AUTO
+    action_mqtt_set_servo,     // EV_MQTT_SET_SERVO
+    action_mqtt_set_light      // EV_MQTT_SET_LIGHT
   }
 };
 
@@ -326,6 +362,12 @@ void fsm_task(void* pvParameters)
     while(true)
     {
       if(xQueueReceive(servo_event_queue, &event, 0) == pdTRUE)
+      {
+        dispatch_event(event);
+        continue;
+      }
+
+      if(xQueueReceive(mqtt_event_queue, &event, 0) == pdTRUE)
       {
         dispatch_event(event);
         continue;
@@ -359,6 +401,8 @@ void dispatch_event(const fsm_event_t& event)
     right_distance_cm = event.right_distance_cm;
     ldr_value = event.ldr_value;
     target_led_brightness = event.target_led_brightness;
+    mqtt_servo_angle = event.servo_angle;
+    mqtt_led_brightness = event.led_brightness;
 
     debug_print_transition(actual_state, event.type);
     state_table[actual_state][event.type]();
@@ -379,28 +423,34 @@ void dispatch_event(const fsm_event_t& event)
   {
     vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(ULTRASONIC_READ_INTERVAL_MS));
 
+    
     if(is_servo_busy())
-      continue;
-
+    continue;
+    
     const float new_left_distance_cm = read_ultrasonic_distance_cm(ULTRASONIC_LEFT_TRIG_PIN, ULTRASONIC_LEFT_ECHO_PIN);
     const float new_right_distance_cm = read_ultrasonic_distance_cm(ULTRASONIC_RIGHT_TRIG_PIN, ULTRASONIC_RIGHT_ECHO_PIN);
-
+    
     const state_t actual_state = get_current_state();
-
+    
     fsm_event_t event =
     {
       EV_CONT,
       new_left_distance_cm,
       new_right_distance_cm,
       ldr_value,
-      target_led_brightness
+      target_led_brightness,
+      UNUSED_SERVO_ANGLE,
+      UNUSED_LED_BRIGHTNESS
     };
+    
+    if(get_current_control_mode() == CONTROL_MODE_MANUAL)
+      continue;
 
     if(!is_person_detected(new_left_distance_cm, new_right_distance_cm))
     {
       previous_left_distance_cm = new_left_distance_cm;
       previous_right_distance_cm = new_right_distance_cm;
-
+      
       event.type = EV_NO_TARGET;
       enqueue_servo_event(event);
       continue;
@@ -447,6 +497,7 @@ void ldr_task(void* pvParameters)
   {
     vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(LDR_READ_INTERVAL_MS));
 
+    
     const int new_ldr_value = read_ldr_value();
     
     if(has_relevant_ldr_change(new_ldr_value))
@@ -454,24 +505,23 @@ void ldr_task(void* pvParameters)
       previous_ldr_value = new_ldr_value;
       latest_target_led_brightness = calculate_led_brightness(new_ldr_value);
     }
-
+    
     const state_t actual_state = get_current_state();
     const int current_brightness = get_current_led_brightness();
-    const light_mode_t light_mode = get_current_light_mode();
-
+    
     fsm_event_t event =
     {
       EV_CONT,
       left_distance_cm,
       right_distance_cm,
       new_ldr_value,
-      latest_target_led_brightness
+      latest_target_led_brightness,
+      UNUSED_SERVO_ANGLE,
+      UNUSED_LED_BRIGHTNESS
     };
-
-    if(light_mode == LIGHT_MODE_MANUAL_OFF)
-    {
+    
+    if(get_current_control_mode() == CONTROL_MODE_MANUAL)
       continue;
-    }
 
     if(actual_state == ST_IDLE && current_brightness > 0)
     {
@@ -551,6 +601,34 @@ void enqueue_light_event(const fsm_event_t& event)
 
   xQueueOverwrite(light_event_queue, &event);
   notify_fsm_task();
+}
+
+void enqueue_mqtt_event(const fsm_event_t& event)
+{
+  if(event.type == EV_CONT)
+    return;
+
+  if(mqtt_event_queue == NULL)
+    return;
+
+  xQueueOverwrite(mqtt_event_queue, &event);
+  notify_fsm_task();
+}
+
+void enqueue_mqtt_event_type(event_t event_type)
+{
+  fsm_event_t event = 
+  {
+    event_type,
+    left_distance_cm,
+    right_distance_cm,
+    ldr_value,
+    target_led_brightness,
+    UNUSED_SERVO_ANGLE,
+    UNUSED_LED_BRIGHTNESS
+  };
+
+  enqueue_mqtt_event(event);
 }
 
 void notify_fsm_task(void)
@@ -743,15 +821,62 @@ void action_update_light(void)
 
 void action_mqtt_light_off(void)
 {
-  set_current_light_mode(LIGHT_MODE_MANUAL_OFF);
+
+  if(get_current_control_mode() != CONTROL_MODE_MANUAL)
+    return;
+
   target_led_brightness = LED_MIN_BRIGHTNESS;
   set_led_brightness(LED_MIN_BRIGHTNESS); 
 }
 
 void action_mqtt_light_on(void)
 {
-  set_current_light_mode(LIGHT_MODE_AUTO);
+  if(get_current_control_mode() != CONTROL_MODE_MANUAL)
+    return;
+
   target_led_brightness = calculate_led_brightness(ldr_value);
+  set_led_brightness(target_led_brightness);
+}
+
+void action_mqtt_mode_manual(void)
+{
+  set_current_control_mode(CONTROL_MODE_MANUAL);
+}
+
+void action_mqtt_mode_auto(void)
+{
+  set_current_control_mode(CONTROL_MODE_AUTO);
+}
+
+void action_mqtt_set_servo(void)
+{
+  if(get_current_control_mode() != CONTROL_MODE_MANUAL)
+    return;
+
+  if(mqtt_servo_angle == UNUSED_SERVO_ANGLE)
+    return;
+
+  const int previous_servo_angle = current_servo_angle;
+
+  current_servo_angle = constrain(mqtt_servo_angle, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
+
+  if(current_servo_angle != previous_servo_angle)
+  {
+    mirrorServo.write(current_servo_angle);
+    mark_servo_busy();
+  }  
+}
+
+void action_mqtt_set_light(void)
+{
+  if(get_current_control_mode() != CONTROL_MODE_MANUAL)
+    return;
+
+  if(mqtt_led_brightness == UNUSED_LED_BRIGHTNESS)
+    return;
+
+  target_led_brightness = constrain(mqtt_led_brightness, LED_MIN_BRIGHTNESS, LED_MAX_BRIGHTNESS);
+  set_led_brightness(target_led_brightness);
 }
 
 void action_none(void)
@@ -825,7 +950,7 @@ void debug_print_transition(state_t state, event_t event)
 }
 
 /* =========================
- * Getters and setters for FSM state and LED brightness (with mutex protection)
+ * Getters and setters (with mutex protection)
  * ========================= */
 
 state_t get_current_state(void)
@@ -859,19 +984,19 @@ void set_current_led_brightness(int brightness)
   portEXIT_CRITICAL(&led_brightness_mutex);
 }
 
-light_mode_t get_current_light_mode(void)
+control_mode_t get_current_control_mode(void)
 {
-  portENTER_CRITICAL(&light_mode_mutex);
-  const light_mode_t mode = current_light_mode;
-  portEXIT_CRITICAL(&light_mode_mutex);
+  portENTER_CRITICAL(&control_mode_mutex);
+  const control_mode_t mode = current_control_mode;
+  portEXIT_CRITICAL(&control_mode_mutex);
   return mode;
 }
 
-void set_current_light_mode(light_mode_t mode)
+void set_current_control_mode(control_mode_t mode)
 {
-  portENTER_CRITICAL(&light_mode_mutex);
-  current_light_mode = mode;
-  portEXIT_CRITICAL(&light_mode_mutex);
+  portENTER_CRITICAL(&control_mode_mutex);
+  current_control_mode = mode;
+  portEXIT_CRITICAL(&control_mode_mutex);
 }
 
 /* =========================
@@ -960,8 +1085,9 @@ void create_queues(void)
 {
   servo_event_queue = xQueueCreate(EVENT_QUEUE_LENGTH, sizeof(fsm_event_t));
   light_event_queue = xQueueCreate(EVENT_QUEUE_LENGTH, sizeof(fsm_event_t));
+  mqtt_event_queue = xQueueCreate(EVENT_QUEUE_LENGTH, sizeof(fsm_event_t));
 
-  if (servo_event_queue == NULL || light_event_queue == NULL)
+  if (servo_event_queue == NULL || light_event_queue == NULL || mqtt_event_queue == NULL)
   {
     Serial.println("[Setup] Error creating queues");
   }
@@ -1038,6 +1164,18 @@ bool connect_mqtt(void)
     Serial.print("[MQTT] Subscribed to ");
     Serial.println(MQTT_TOPIC_CONTROL_LED);
 
+    mqttClient.subscribe(MQTT_TOPIC_CONTROL_MODE);
+    Serial.print("[MQTT] Subscribed to ");
+    Serial.println(MQTT_TOPIC_CONTROL_MODE);
+
+    mqttClient.subscribe(MQTT_TOPIC_CONTROL_SERVO);
+    Serial.print("[MQTT] Subscribed to ");
+    Serial.println(MQTT_TOPIC_CONTROL_SERVO);
+
+    mqttClient.subscribe(MQTT_TOPIC_CONTROL_LIGHT);
+    Serial.print("[MQTT] Subscribed to ");
+    Serial.println(MQTT_TOPIC_CONTROL_LIGHT);
+
     return true;
   }
 
@@ -1061,43 +1199,97 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length)
   Serial.print(" | Payload: ");
   Serial.println(message);
 
-  if(strcmp(topic, MQTT_TOPIC_CONTROL_LED) != 0)
-    return;
-
-  if(strcmp(message, "0") == 0)
+  if(strcmp(topic, MQTT_TOPIC_CONTROL_MODE) == 0)
   {
-    Serial.println("[MQTT] LED command: OFF");
-    enqueue_mqtt_light_event(EV_MQTT_LIGHT_OFF);
+    if(strcmp(message, "manual") == 0)
+    {
+      Serial.println("[MQTT] Control mode: MANUAL");
+      enqueue_mqtt_event_type(EV_MQTT_MODE_MANUAL);
+      return;
+    }
+
+    if(strcmp(message, "automatico") == 0)
+    {
+      Serial.println("[MQTT] Control mode: AUTO");
+      enqueue_mqtt_event_type(EV_MQTT_MODE_AUTO);
+      return;
+    }
+
+    Serial.println("[MQTT] Unknown control mode command received.");
     return;
   }
 
-  if(strcmp(message, "1") == 0)
+  if(strcmp(topic, MQTT_TOPIC_CONTROL_LED) == 0)
   {
-    Serial.println("[MQTT] LED command: ON");
-    enqueue_mqtt_light_event(EV_MQTT_LIGHT_ON);
+    if(strcmp(message, "0") == 0)
+    {
+      Serial.println("[MQTT] LED command: OFF");
+      enqueue_mqtt_event_type(EV_MQTT_LIGHT_OFF);
+      return;
+    }
+
+    if(strcmp(message, "1") == 0)
+    {
+      Serial.println("[MQTT] LED command: ON");
+      enqueue_mqtt_event_type(EV_MQTT_LIGHT_ON);
+      return;
+    }
+
+    Serial.println("[MQTT] Unknown LED command received.");
     return;
   }
 
-  Serial.println("[MQTT] Unknown LED command.");
-}
-
-void enqueue_mqtt_light_event(event_t event_type)
-{
-  fsm_event_t event =
+  if(strcmp(topic, MQTT_TOPIC_CONTROL_SERVO) == 0)
   {
-    event_type,
-    left_distance_cm,
-    right_distance_cm,
-    ldr_value,
-    target_led_brightness
-  };
+    const int servo_angle = atoi(message);
 
-  enqueue_light_event(event);
+    fsm_event_t event =
+    {
+      EV_MQTT_SET_SERVO,
+      left_distance_cm,
+      right_distance_cm,
+      ldr_value,
+      target_led_brightness,
+      servo_angle,
+      UNUSED_LED_BRIGHTNESS
+    };
+
+    Serial.print("[MQTT] Servo command: Set angle to ");
+    Serial.println(servo_angle);
+
+    enqueue_mqtt_event(event);
+    return;
+  }
+
+  if(strcmp(topic, MQTT_TOPIC_CONTROL_LIGHT) == 0)
+  {
+    const int led_brightness = atoi(message);
+
+    fsm_event_t event =
+    {
+      EV_MQTT_SET_LIGHT,
+      left_distance_cm,
+      right_distance_cm,
+      ldr_value,
+      target_led_brightness,
+      UNUSED_SERVO_ANGLE,
+      led_brightness
+    };
+
+    Serial.print("[MQTT] LED command: Set brightness to ");
+    Serial.println(led_brightness);
+
+    enqueue_mqtt_event(event);
+    return;
+  }
 }
 
 void publish_mqtt_telemetry(void)
 {
   if(!mqttClient.connected())
+    return;
+
+  if(get_current_control_mode() == CONTROL_MODE_MANUAL)
     return;
 
   char payload[24];
