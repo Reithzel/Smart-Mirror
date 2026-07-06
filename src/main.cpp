@@ -57,8 +57,8 @@
 #define LED_STRIP_PIN               14
 #define LED_STRIP_PIXEL_COUNT       16
 
-#define LDR_DARK_VALUE              3000
-#define LDR_BRIGHT_VALUE            800
+#define LDR_DARK_VALUE              800
+#define LDR_BRIGHT_VALUE            3000
 
 #define LED_MIN_BRIGHTNESS          0
 #define LED_MAX_BRIGHTNESS          255
@@ -1005,18 +1005,18 @@ void set_current_control_mode(control_mode_t mode)
 
 int calculate_led_brightness(int ldr_value)
 {
-  if (ldr_value <= LDR_BRIGHT_VALUE)
-  {
-    return LED_MAX_BRIGHTNESS;
-  }
-
-  if (ldr_value >= LDR_DARK_VALUE)
+  if (ldr_value >= LDR_BRIGHT_VALUE)
   {
     return LED_MIN_BRIGHTNESS;
   }
 
-  return ((LDR_DARK_VALUE - ldr_value) * LED_MAX_BRIGHTNESS) /
-         (LDR_DARK_VALUE - LDR_BRIGHT_VALUE);
+  if (ldr_value <= LDR_DARK_VALUE)
+  {
+    return LED_MAX_BRIGHTNESS;
+  }
+
+  return ((LDR_BRIGHT_VALUE - ldr_value) * LED_MAX_BRIGHTNESS) /
+         (LDR_BRIGHT_VALUE - LDR_DARK_VALUE);
 }
 
 void set_led_brightness(int brightness)
